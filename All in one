@@ -1,0 +1,772 @@
+--[[
+    DX ALL-IN-ONE
+    Categorias: Mastery | Fruit | Chest
+    Scripts originais preservados.
+    CORREÇÃO: Na aba Chest, o dropdown (Modo) é criado após o slider, garantindo prioridade.
+--]]
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local VirtualUser = game:GetService("VirtualUser")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Player = Players.LocalPlayer
+
+-- ============================================================
+-- 1. SISTEMA DE COMBATE (usado em Mastery)
+-- ============================================================
+local Net = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
+if not Net then Net = ReplicatedStorage:FindFirstChild("Net") end
+local RegisterAttack = Net and Net["RE/RegisterAttack"]
+local RegisterHit = Net and Net["RE/RegisterHit"]
+
+if not RegisterAttack or not RegisterHit then
+    warn("Módulos de combate não encontrados. Usando fallback VirtualUser.")
+end
+
+local function GetSessionID()
+    local sendHits = getrenv()._G.SendHitsToServer
+    if sendHits then
+        local combatThread = getupvalues(sendHits)[1]
+        if combatThread then
+            local userSlice = tostring(Player.UserId):sub(2, 4)
+            local memSlice = tostring(combatThread):sub(11, 15)
+            return userSlice .. memSlice
+        end
+    end
+    return "00000000"
+end
+
+local function Attack(targetCharacter)
+    if RegisterAttack and RegisterHit then
+        pcall(function()
+            RegisterAttack:FireServer(0.5)
+            task.wait()
+            local leg = targetCharacter:FindFirstChild("RightLowerLeg") or targetCharacter:FindFirstChild("HumanoidRootPart")
+            if leg then
+                local data = { leg, {}, nil, GetSessionID() }
+                RegisterHit:FireServer(unpack(data))
+            end
+        end)
+    else
+        VirtualUser:CaptureController()
+        VirtualUser:Button1Down(Vector2.new(1280, 672))
+        task.wait(0.02)
+        VirtualUser:Button1Up(Vector2.new(1280, 672))
+    end
+end
+
+-- ============================================================
+-- 2. CATEGORIA MASTERY (Auto Farm Nearest)
+-- ============================================================
+local masteryActive = false
+local masteryThread = nil
+local masteryRange = 50
+local masterySpeed = 150
+local masteryHeight = 15
+
+local function MoveToNPC_Mastery(npcRoot)
+    local hrp = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local targetPos = npcRoot.Position + Vector3.new(0, masteryHeight, 0)
+    local dist = (hrp.Position - targetPos).Magnitude
+    local duration = dist / masterySpeed
+    if duration < 0.1 then duration = 0.1 end
+    local tween = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = CFrame.new(targetPos)})
+    tween:Play()
+    tween.Completed:Wait()
+end
+
+local function MasteryLoop()
+    while masteryActive do
+        local nearest = nil
+        local bestDist = masteryRange
+        for _, v in pairs(workspace.Enemies:GetChildren()) do
+            local hrp = v:FindFirstChild("HumanoidRootPart")
+            local hum = v:FindFirstChild("Humanoid")
+            if hrp and hum and hum.Health > 0 then
+                local dist = (Player.Character.HumanoidRootPart.Position - hrp.Position).Magnitude
+                if dist < bestDist then
+                    nearest = v
+                    bestDist = dist
+                end
+            end
+        end
+        if not nearest then
+            task.wait(0.5)
+            continue
+        end
+        local npcRoot = nearest.HumanoidRootPart
+        MoveToNPC_Mastery(npcRoot)
+        while masteryActive and nearest and nearest.Parent and nearest.Humanoid and nearest.Humanoid.Health > 0 do
+            local hrp = Player.Character.HumanoidRootPart
+            local targetPos = npcRoot.Position + Vector3.new(0, masteryHeight, 0)
+            if (hrp.Position - targetPos).Magnitude > 3 then
+                hrp.CFrame = CFrame.new(targetPos)
+            end
+            Attack(nearest)
+            task.wait(0.2)
+        end
+        task.wait(0.3)
+    end
+end
+
+-- ============================================================
+-- 3. CATEGORIA FRUIT (ESP Fruits + Go to Fruit + Walk on Water)
+-- ============================================================
+local espActive = false
+local espLabels = {}
+local goActive = false
+local currentTween = nil
+local goThread = nil
+local flySpeed = 100
+local walkActive = false
+local platformParts = {}
+local waterPos = Vector3.new(-16561.259765625, -4, 835.57958984375)
+local partSize = 2048
+local espessura = 20
+local gridSize = 31
+
+local function createPlatform()
+    if #platformParts > 0 then return end
+    local half = (gridSize - 1) / 2
+    local step = partSize
+    for i = 0, gridSize-1 do
+        for j = 0, gridSize-1 do
+            local part = Instance.new("Part")
+            part.Name = "WaterWalkPlatform"
+            part.Size = Vector3.new(partSize, espessura, partSize)
+            local offsetX = (i - half) * step
+            local offsetZ = (j - half) * step
+            part.Position = Vector3.new(
+                waterPos.X + offsetX,
+                waterPos.Y - (espessura / 2),
+                waterPos.Z + offsetZ
+            )
+            part.Anchored = true
+            part.CanCollide = true
+            part.Transparency = 0.5
+            part.Color = Color3.fromRGB(0, 200, 255)
+            part.Material = Enum.Material.Plastic
+            part.Parent = workspace
+            table.insert(platformParts, part)
+            task.wait()
+        end
+    end
+end
+
+local function destroyPlatform()
+    for _, part in ipairs(platformParts) do part:Destroy() end
+    platformParts = {}
+end
+
+local function isValidFruit(inst)
+    return inst:IsA("Tool") and inst.Name:lower():find("fruit")
+end
+
+local function createESP(inst)
+    if espLabels[inst] then return end
+    local attach = inst:FindFirstChild("Handle") or inst
+    local bill = Instance.new("BillboardGui")
+    bill.Size = UDim2.new(0, 100, 0, 30)
+    bill.StudsOffset = Vector3.new(0, 1.5, 0)
+    bill.AlwaysOnTop = true
+    bill.Parent = attach
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Text = "FRUIT"
+    label.TextColor3 = Color3.fromRGB(255, 0, 0)
+    label.TextScaled = true
+    label.Font = Enum.Font.GothamBold
+    label.Parent = bill
+    espLabels[inst] = bill
+end
+
+local function removeESP(inst)
+    if espLabels[inst] then espLabels[inst]:Destroy() end
+    espLabels[inst] = nil
+end
+
+local function updateESP()
+    if not espActive then
+        for inst, bill in pairs(espLabels) do bill:Destroy() end
+        espLabels = {}
+        return
+    end
+    local current = {}
+    local function scan(parent)
+        for _, child in pairs(parent:GetChildren()) do
+            if isValidFruit(child) then current[child] = true end
+            scan(child)
+        end
+    end
+    scan(workspace)
+    for inst in pairs(espLabels) do
+        if not current[inst] then removeESP(inst) end
+    end
+    for inst in pairs(current) do
+        if not espLabels[inst] then createESP(inst) end
+    end
+end
+
+local espLoop
+local function startESPLoop()
+    if espLoop then return end
+    espLoop = task.spawn(function()
+        while espActive do
+            updateESP()
+            task.wait(0.5)
+        end
+        updateESP()
+        espLoop = nil
+    end)
+end
+
+local function enableNoclip()
+    local char = Player.Character
+    if not char then return end
+    for _, part in pairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then part.CanCollide = false end
+    end
+end
+
+local function disableNoclip()
+    local char = Player.Character
+    if not char then return end
+    for _, part in pairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then part.CanCollide = true end
+    end
+end
+
+local function getFruitPositions()
+    local list = {}
+    for inst, _ in pairs(espLabels) do
+        local attach = inst:FindFirstChild("Handle") or inst
+        if attach and attach:IsA("BasePart") then
+            table.insert(list, {pos = attach.Position})
+        end
+    end
+    return list
+end
+
+local function tweenTo(pos, speed)
+    local hrp = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local dist = (hrp.Position - pos).Magnitude
+    if dist < 2 then return true end
+    local dur = dist / speed
+    local tween = TweenService:Create(hrp, TweenInfo.new(dur, Enum.EasingStyle.Linear), {CFrame = CFrame.new(pos)})
+    currentTween = tween
+    enableNoclip()
+    tween:Play()
+    tween.Completed:Wait()
+    disableNoclip()
+    currentTween = nil
+    return true
+end
+
+local function goLoop()
+    while goActive do
+        local fruits = getFruitPositions()
+        if #fruits == 0 then task.wait(0.5) continue end
+        local hrp = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp then task.wait(1) continue end
+        table.sort(fruits, function(a,b) return (hrp.Position - a.pos).Magnitude < (hrp.Position - b.pos).Magnitude end)
+        for _, f in ipairs(fruits) do
+            if not goActive then break end
+            tweenTo(f.pos, flySpeed)
+            if goActive then task.wait(0.3) end
+        end
+        task.wait(0.2)
+    end
+    disableNoclip()
+end
+
+local function startGo()
+    if goThread then return end
+    goThread = task.spawn(goLoop)
+end
+
+local function stopGo()
+    if currentTween then currentTween:Cancel() disableNoclip() currentTween = nil end
+    goActive = false
+    if goThread then task.cancel(goThread) goThread = nil end
+    disableNoclip()
+end
+
+-- ============================================================
+-- 4. CATEGORIA CHEST (Farm de baús)
+-- ============================================================
+local chestActive = false
+local chestThread = nil
+local chestMode = "Teleport"
+local chestTweenSpeed = 100
+
+local function ChestFarmLoop()
+    while chestActive do
+        local chestFolder = workspace:FindFirstChild("ChestModels")
+        local targetPart = nil
+        if chestFolder then
+            for _, model in pairs(chestFolder:GetChildren()) do
+                if model:IsA("Model") and (model.Name == "GoldChest" or model.Name == "SilverChest" or model.Name == "DiamondChest") then
+                    for _, part in pairs(model:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            targetPart = part
+                            break
+                        end
+                    end
+                    if targetPart then break end
+                end
+            end
+        end
+        if not targetPart then
+            task.wait(1)
+            continue
+        end
+        local targetPos = targetPart.CFrame
+        if chestMode == "Teleport" then
+            Player.Character.HumanoidRootPart.CFrame = targetPos
+            task.wait(0.5)
+        else
+            local hrp = Player.Character.HumanoidRootPart
+            local dist = (hrp.Position - targetPos.Position).Magnitude
+            local duration = dist / chestTweenSpeed
+            if duration < 0.1 then duration = 0.1 end
+            local tween = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = targetPos})
+            tween:Play()
+            tween.Completed:Wait()
+            task.wait(0.5)
+        end
+        firetouchinterest(Player.Character.HumanoidRootPart, targetPart, 0)
+        task.wait(0.2)
+        firetouchinterest(Player.Character.HumanoidRootPart, targetPart, 1)
+        task.wait(1)
+    end
+end
+
+-- ============================================================
+-- 5. GUI PRINCIPAL (categorias à esquerda, conteúdo à direita)
+-- ============================================================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "DXAllInOne"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = CoreGui
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 800, 0, 550)
+mainFrame.Position = UDim2.new(0.5, -400, 0.5, -275)
+mainFrame.BackgroundColor3 = Color3.fromRGB(30,30,35)
+mainFrame.BackgroundTransparency = 0.1
+mainFrame.BorderSizePixel = 1
+mainFrame.BorderColor3 = Color3.fromRGB(255,85,85)
+mainFrame.Parent = screenGui
+local frameCorner = Instance.new("UICorner")
+frameCorner.CornerRadius = UDim.new(0, 10)
+frameCorner.Parent = mainFrame
+
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1,0,0,35)
+titleBar.BackgroundColor3 = Color3.fromRGB(255,85,85)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = mainFrame
+local titleCorner = Instance.new("UICorner")
+titleCorner.CornerRadius = UDim.new(0, 10)
+titleCorner.Parent = titleBar
+
+local titleText = Instance.new("TextLabel")
+titleText.Size = UDim2.new(1,-70,1,0)
+titleText.Position = UDim2.new(0,10,0,0)
+titleText.BackgroundTransparency = 1
+titleText.Text = "DX HUB"
+titleText.TextColor3 = Color3.fromRGB(255,255,255)
+titleText.TextSize = 18
+titleText.Font = Enum.Font.GothamBold
+titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.Parent = titleBar
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0,30,0,30)
+closeBtn.Position = UDim2.new(1,-35,0,2.5)
+closeBtn.BackgroundColor3 = Color3.fromRGB(200,50,50)
+closeBtn.Text = "X"
+closeBtn.TextColor3 = Color3.fromRGB(255,255,255)
+closeBtn.TextSize = 16
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.BorderSizePixel = 0
+closeBtn.Parent = titleBar
+
+local drag = false
+local dragStart, startPos
+titleBar.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then
+        drag = true
+        dragStart = i.Position
+        startPos = mainFrame.Position
+    end
+end)
+UserInputService.InputChanged:Connect(function(i)
+    if drag and i.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = i.Position - dragStart
+        mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+UserInputService.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = false end
+end)
+
+-- Categorias à esquerda
+local categories = {"Mastery", "Fruit", "Chest"}
+local categoryButtons = {}
+local categoryFrame = Instance.new("Frame")
+categoryFrame.Size = UDim2.new(0, 150, 1, -45)
+categoryFrame.Position = UDim2.new(0, 0, 0, 45)
+categoryFrame.BackgroundColor3 = Color3.fromRGB(25,25,30)
+categoryFrame.BackgroundTransparency = 0.2
+categoryFrame.Parent = mainFrame
+
+local categoryList = Instance.new("UIListLayout")
+categoryList.Padding = UDim.new(0, 15)
+categoryList.SortOrder = Enum.SortOrder.LayoutOrder
+categoryList.Parent = categoryFrame
+
+local function createCategoryButton(name, yPos)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -20, 0, 45)
+    btn.Position = UDim2.new(0, 10, 0, yPos)
+    btn.BackgroundColor3 = Color3.fromRGB(40,40,45)
+    btn.Text = name
+    btn.TextColor3 = Color3.fromRGB(255,255,255)
+    btn.TextSize = 16
+    btn.Font = Enum.Font.GothamBold
+    btn.BorderSizePixel = 0
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = btn
+    btn.Parent = categoryFrame
+    return btn
+end
+
+-- Área de conteúdo à direita
+local contentFrame = Instance.new("Frame")
+contentFrame.Size = UDim2.new(1, -170, 1, -55)
+contentFrame.Position = UDim2.new(0, 160, 0, 50)
+contentFrame.BackgroundColor3 = Color3.fromRGB(30,30,35)
+contentFrame.BackgroundTransparency = 0
+contentFrame.Parent = mainFrame
+
+local contentScrolling = Instance.new("ScrollingFrame")
+contentScrolling.Size = UDim2.new(1, -20, 1, -20)
+contentScrolling.Position = UDim2.new(0, 10, 0, 10)
+contentScrolling.BackgroundTransparency = 1
+contentScrolling.ScrollBarThickness = 8
+contentScrolling.Parent = contentFrame
+
+local contentContainer = Instance.new("Frame")
+contentContainer.Size = UDim2.new(1, 0, 0, 0)
+contentContainer.BackgroundTransparency = 1
+contentContainer.Parent = contentScrolling
+contentScrolling.CanvasSize = UDim2.new(0,0,0,0)
+
+local contentList = Instance.new("UIListLayout")
+contentList.Padding = UDim.new(0, 15)
+contentList.SortOrder = Enum.SortOrder.LayoutOrder
+contentList.Parent = contentContainer
+
+local function clearContent()
+    for _, child in pairs(contentContainer:GetChildren()) do
+        if child ~= contentList then child:Destroy() end
+    end
+    contentScrolling.CanvasSize = UDim2.new(0,0,0,0)
+end
+
+local function addToggle(parent, text, defaultColor, callback)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 40)
+    btn.BackgroundColor3 = defaultColor or Color3.fromRGB(76,175,80)
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(255,255,255)
+    btn.TextSize = 14
+    btn.Font = Enum.Font.GothamBold
+    btn.BorderSizePixel = 0
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0,6)
+    corner.Parent = btn
+    btn.Parent = parent
+    local active = false
+    btn.MouseButton1Click:Connect(function()
+        active = not active
+        btn.Text = text:gsub(": OFF", ""):gsub(": ON", "") .. (active and ": ON" or ": OFF")
+        btn.BackgroundColor3 = active and Color3.fromRGB(244,67,54) or (defaultColor or Color3.fromRGB(76,175,80))
+        callback(active)
+    end)
+    return btn, function() return active end
+end
+
+local function addSlider(parent, label, minV, maxV, defaultV, callback)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 55)
+    frame.BackgroundColor3 = Color3.fromRGB(40,40,45)
+    frame.BorderSizePixel = 0
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0,6)
+    corner.Parent = frame
+    frame.Parent = parent
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1,0,0,20)
+    lbl.Position = UDim2.new(0,0,0,5)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = label .. ": " .. defaultV
+    lbl.TextColor3 = Color3.fromRGB(255,255,255)
+    lbl.TextSize = 12
+    lbl.Font = Enum.Font.GothamBold
+    lbl.Parent = frame
+
+    local barBack = Instance.new("Frame")
+    barBack.Size = UDim2.new(0.9,0,0.3,0)
+    barBack.Position = UDim2.new(0.05,0,0.7,0)
+    barBack.BackgroundColor3 = Color3.fromRGB(80,80,90)
+    barBack.BorderSizePixel = 0
+    barBack.Parent = frame
+    local barFill = Instance.new("Frame")
+    barFill.Size = UDim2.new((defaultV-minV)/(maxV-minV),0,1,0)
+    barFill.BackgroundColor3 = Color3.fromRGB(255,85,85)
+    barFill.BorderSizePixel = 0
+    barFill.Parent = barBack
+
+    local dragging = false
+    local function update(posX)
+        local rel = math.clamp((posX - barBack.AbsolutePosition.X) / barBack.AbsoluteSize.X, 0, 1)
+        local val = minV + rel * (maxV - minV)
+        val = math.floor(val)
+        lbl.Text = label .. ": " .. val
+        barFill.Size = UDim2.new((val-minV)/(maxV-minV),0,1,0)
+        callback(val)
+    end
+    barBack.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            update(input.Position.X)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            update(input.Position.X)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    return frame
+end
+
+local function addDropdown(parent, label, items, default, callback)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 40)
+    frame.BackgroundColor3 = Color3.fromRGB(40,40,45)
+    frame.BorderSizePixel = 0
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0,6)
+    corner.Parent = frame
+    frame.Parent = parent
+
+    local text = Instance.new("TextLabel")
+    text.Size = UDim2.new(0.6,0,1,0)
+    text.Position = UDim2.new(0.05,0,0,0)
+    text.BackgroundTransparency = 1
+    text.Text = label .. ": " .. default
+    text.TextColor3 = Color3.fromRGB(255,255,255)
+    text.TextSize = 14
+    text.Font = Enum.Font.GothamBold
+    text.TextXAlignment = Enum.TextXAlignment.Left
+    text.Parent = frame
+
+    local dropBtn = Instance.new("TextButton")
+    dropBtn.Size = UDim2.new(0.3,0,1,0)
+    dropBtn.Position = UDim2.new(0.65,0,0,0)
+    dropBtn.BackgroundColor3 = Color3.fromRGB(80,80,90)
+    dropBtn.Text = "▼"
+    dropBtn.TextColor3 = Color3.fromRGB(255,255,255)
+    dropBtn.TextSize = 14
+    dropBtn.Font = Enum.Font.GothamBold
+    dropBtn.Parent = frame
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0,6)
+    btnCorner.Parent = dropBtn
+
+    local dropdown = Instance.new("Frame")
+    dropdown.Size = UDim2.new(0.3,0,0,100)
+    dropdown.Position = UDim2.new(0.65,0,1,0)
+    dropdown.BackgroundColor3 = Color3.fromRGB(30,30,35)
+    dropdown.BorderSizePixel = 0
+    dropdown.Visible = false
+    local dropCorner = Instance.new("UICorner")
+    dropCorner.CornerRadius = UDim.new(0,6)
+    dropCorner.Parent = dropdown
+    dropdown.Parent = frame
+
+    local uiList = Instance.new("UIListLayout")
+    uiList.Padding = UDim.new(0,2)
+    uiList.Parent = dropdown
+
+    for _, item in ipairs(items) do
+        local itemBtn = Instance.new("TextButton")
+        itemBtn.Size = UDim2.new(1,0,0,30)
+        itemBtn.BackgroundColor3 = Color3.fromRGB(50,50,55)
+        itemBtn.Text = item
+        itemBtn.TextColor3 = Color3.fromRGB(255,255,255)
+        itemBtn.TextSize = 12
+        itemBtn.Font = Enum.Font.GothamBold
+        local itemCorner = Instance.new("UICorner")
+        itemCorner.CornerRadius = UDim.new(0,4)
+        itemCorner.Parent = itemBtn
+        itemBtn.Parent = dropdown
+        itemBtn.MouseButton1Click:Connect(function()
+            text.Text = label .. ": " .. item
+            dropdown.Visible = false
+            callback(item)
+        end)
+    end
+    local function updateHeight()
+        local count = #dropdown:GetChildren() - 1
+        dropdown.Size = UDim2.new(0.3,0,0, math.min(count*32, 200))
+    end
+    updateHeight()
+    dropBtn.MouseButton1Click:Connect(function()
+        dropdown.Visible = not dropdown.Visible
+    end)
+    return frame
+end
+
+-- ========== CONTEÚDO DAS CATEGORIAS ==========
+local function showMastery()
+    clearContent()
+    addToggle(contentContainer, "Auto Farm Nearest: OFF", Color3.fromRGB(76,175,80), function(active)
+        masteryActive = active
+        if masteryThread then task.cancel(masteryThread) end
+        if active then masteryThread = task.spawn(MasteryLoop) end
+    end)
+    addSlider(contentContainer, "Velocidade Tween", 0, 400, masterySpeed, function(val)
+        masterySpeed = val
+    end)
+    addSlider(contentContainer, "Distância Detecção", 10, 300, masteryRange, function(val)
+        masteryRange = val
+    end)
+    task.wait(0.1)
+    contentScrolling.CanvasSize = UDim2.new(0,0,0, contentList.AbsoluteContentSize.Y + 20)
+end
+
+local function showFruit()
+    clearContent()
+    addToggle(contentContainer, "Walk on Water: OFF", Color3.fromRGB(76,175,80), function(active)
+        walkActive = active
+        if active then createPlatform() else destroyPlatform() end
+    end)
+    local espToggle, _ = addToggle(contentContainer, "ESP Fruits: OFF", Color3.fromRGB(76,175,80), function(active)
+        espActive = active
+        if active then
+            if espLoop then task.cancel(espLoop) end
+            espLoop = task.spawn(function()
+                while espActive do
+                    updateESP()
+                    task.wait(0.5)
+                end
+                updateESP()
+            end)
+        else
+            if espLoop then task.cancel(espLoop); espLoop = nil end
+            updateESP()
+        end
+    end)
+    addToggle(contentContainer, "GO TO FRUIT: OFF", Color3.fromRGB(76,175,80), function(active)
+        goActive = active
+        if active then
+            if not espActive then
+                espActive = true
+                espToggle.Text = "ESP Fruits: ON"
+                espToggle.BackgroundColor3 = Color3.fromRGB(244,67,54)
+                if espLoop then task.cancel(espLoop) end
+                espLoop = task.spawn(function()
+                    while espActive do
+                        updateESP()
+                        task.wait(0.5)
+                    end
+                    updateESP()
+                end)
+            end
+            startGo()
+        else
+            stopGo()
+        end
+    end)
+    addSlider(contentContainer, "Velocidade de Voo", 0, 400, flySpeed, function(val)
+        flySpeed = val
+    end)
+    task.wait(0.1)
+    contentScrolling.CanvasSize = UDim2.new(0,0,0, contentList.AbsoluteContentSize.Y + 20)
+end
+
+local function showChest()
+    clearContent()
+    -- 1. Toggle principal
+    addToggle(contentContainer, "Auto Farm Chest: OFF", Color3.fromRGB(76,175,80), function(active)
+        chestActive = active
+        if chestThread then task.cancel(chestThread) end
+        if active then chestThread = task.spawn(ChestFarmLoop) end
+    end)
+    -- 2. Slider (Velocidade Tween)
+    addSlider(contentContainer, "Velocidade Tween", 0, 400, chestTweenSpeed, function(val)
+        chestTweenSpeed = val
+    end)
+    -- 3. Dropdown (Modo) - criado por último para ficar sobreposto
+    addDropdown(contentContainer, "Modo", {"Teleport", "Tween"}, chestMode, function(selected)
+        chestMode = selected
+    end)
+    task.wait(0.1)
+    contentScrolling.CanvasSize = UDim2.new(0,0,0, contentList.AbsoluteContentSize.Y + 20)
+end
+
+-- Criar botões de categoria
+local btnMastery = createCategoryButton("Mastery", 20)
+local btnFruit = createCategoryButton("Fruit", 80)
+local btnChest = createCategoryButton("Chest", 140)
+
+btnMastery.MouseButton1Click:Connect(function()
+    showMastery()
+    for _, btn in pairs(categoryButtons) do btn.BackgroundColor3 = Color3.fromRGB(40,40,45) end
+    btnMastery.BackgroundColor3 = Color3.fromRGB(255,85,85)
+end)
+btnFruit.MouseButton1Click:Connect(function()
+    showFruit()
+    for _, btn in pairs(categoryButtons) do btn.BackgroundColor3 = Color3.fromRGB(40,40,45) end
+    btnFruit.BackgroundColor3 = Color3.fromRGB(255,85,85)
+end)
+btnChest.MouseButton1Click:Connect(function()
+    showChest()
+    for _, btn in pairs(categoryButtons) do btn.BackgroundColor3 = Color3.fromRGB(40,40,45) end
+    btnChest.BackgroundColor3 = Color3.fromRGB(255,85,85)
+end)
+
+categoryButtons = {btnMastery, btnFruit, btnChest}
+showMastery()
+btnMastery.BackgroundColor3 = Color3.fromRGB(255,85,85)
+
+-- Fechar e limpar
+closeBtn.MouseButton1Click:Connect(function()
+    masteryActive = false; if masteryThread then task.cancel(masteryThread) end
+    espActive = false; if espLoop then task.cancel(espLoop) end; updateESP()
+    goActive = false; stopGo()
+    chestActive = false; if chestThread then task.cancel(chestThread) end
+    destroyPlatform()
+    screenGui:Destroy()
+end)
+
+Player.Idled:Connect(function()
+    VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+    task.wait(1)
+    VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+end)
+
+print("DX All-in-One carregado. Na aba Chest, o dropdown 'Modo' agora é criado após o slider e tem prioridade visual.")
